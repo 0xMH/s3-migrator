@@ -1,0 +1,32 @@
+version: "3"
+
+services:
+  mariadb:
+    image: "mariadb:${MARIADB_VERSION}"
+    restart: 'always'
+    networks:
+      - s_db
+    volumes:
+      - logs:/var/log/mysql/logs
+      - mariadb-data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+  adminer:
+    image: adminer
+    restart: always
+    networks:
+      - s_db
+    ports:
+      - 8080:8080
+
+volumes:
+  mariadb-data:
+  logs:
+networks:
+  s_db:
