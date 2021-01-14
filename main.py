@@ -3,7 +3,10 @@ import sys
 import datetime
 import boto3
 import mariadb
+# from mariadb.connector import pooling
 from dotenv import load_dotenv
+import mysql.connector
+from mysql.connector import pooling
 
 begin_time = datetime.datetime.now()
 print(datetime.datetime.now())
@@ -21,9 +24,16 @@ s3 = boto3.client(
     aws_secret_access_key=aws_secret_access_key
 )
 
+connection_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name="pynative_pool",
+                                                              pool_size=10,
+                                                              pool_reset_session=True,
+                                                              user=os.getenv('DBUser'),
+                                                              password=os.getenv('DBPassword'),
+                                                              host="127.0.0.1",
+                                                              port=3306)
+
 # Instantiate Cursor
 # TODO: Use MySQLCursorRaw cursor for performance
-
 def create_mariadb_connection():
     try:
         conn = mariadb.connect(
@@ -81,9 +91,8 @@ def move_file(old_filename, cur):
     update_record(new_filename, old_filename, cur)
 
 if __name__ == "__main__":
-    connection = create_mariadb_connection()
-    connection2 = create_mariadb_connection()
-    connection2 = create_mariadb_connection()
+    connection= connection_pool.get_connection()
+    connection2 = connection_pool.get_connection()
     cur = connection2.cursor()
     query_with_fetchmany(connection, cur)
 
