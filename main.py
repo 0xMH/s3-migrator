@@ -24,7 +24,7 @@ s3 = boto3.client(
     aws_secret_access_key=aws_secret_access_key
 )
 
-connection_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name="pynative_pool",
+connection_pool = pooling.MySQLConnectionPool(pool_name="pynative_pool",
                                                               pool_size=10,
                                                               pool_reset_session=True,
                                                               user=os.getenv('DBUser'),
@@ -55,6 +55,9 @@ def iter_row(cur, size=10):
         for row in rows:
             yield row
 
+def delete_object(object_name):
+    s3.delete_object(Bucket=bucket_from, Key=object_name)
+
 def query_with_fetchmany(conn, cur2):
     try:
         cur = conn.cursor()
@@ -79,7 +82,7 @@ def update_record(new_value, old_value, cur):
     connection2.commit()
 
 def move_file(old_filename, cur):
-    new_filename='avatar/'+ old_filename.split('/')[-1]
+    new_filename='avatar/'+ "/".join(old_filename.split('/')[1:])
     print(old_filename)
     print(new_filename)
     s3.copy_object(
@@ -89,6 +92,7 @@ def move_file(old_filename, cur):
         Key=new_filename
     )
     update_record(new_filename, old_filename, cur)
+    delete_object(old_filename)
 
 if __name__ == "__main__":
     connection= connection_pool.get_connection()
@@ -96,7 +100,6 @@ if __name__ == "__main__":
     cur = connection2.cursor()
     query_with_fetchmany(connection, cur)
 
-    print(datetime.datetime.now() - begin_time)
-
     cur.close()
     connection2.close()
+    print(datetime.datetime.now() - begin_time)
