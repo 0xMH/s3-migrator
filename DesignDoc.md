@@ -23,6 +23,7 @@ Cons:
    needs to be moved or not and another to update the file's state after
    actually moving it). So, a large number of Lambdas running concurrently will
    be a huge problem here.
+ - We will have problems with reading/writing on MariaDB at the same time. 
  - An inability to keep the state of the current invoked lambda batch without using an external service like Redis/S3/DynamoDb for example. If we could do that we could've
    done that and used a bulk update to MariaDB.
  - Additional costs of lambda functions which will add up quickly as we're
