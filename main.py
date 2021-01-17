@@ -1,15 +1,19 @@
 import concurrent.futures
 import datetime
+import json
+import logging
 import os
-import sys
+import re
 from time import sleep
 
 import boto3
-from dotenv import load_dotenv
+import botocore
 import mysql
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
 from mysql.connector import pooling
+
 begin_time = datetime.datetime.now()
-print(datetime.datetime.now())
 
 load_dotenv()
 
@@ -18,12 +22,22 @@ aws_secret_access_key = os.getenv('aws_secret_access_key')
 bucket_from = os.getenv('bucket_from')
 bucket_to = os.getenv('bucket_to')
 
+client_config = botocore.config.Config(
+    max_pool_connections=50,
+)
 
 s3 = boto3.client(
     's3',
     aws_access_key_id=aws_access_key_id,
-    aws_secret_access_key=aws_secret_access_key
+    aws_secret_access_key=aws_secret_access_key,
+    config=client_config
 )
+
+
+# Set up our logger
+format = '%(asctime)s - %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=format)
+logger = logging.getLogger()
 
 
 def delete_object(object_name):
@@ -86,6 +100,13 @@ def iter_row(connection):
        Returns (generator): returns a generator containing a specfied numbers of files.
     """
     rows_count = s3_objects_count(connection)
+    if rows_count == 0:
+        logger.info(
+            ' Cant find any object on Database. All objects are moved to Bucket %s', bucket_to)
+        exit()
+    logger.info(
+        'Found %s Objects on database. Starting the moving process', rows_count)
+
     for i in range(0, rows_count, 10):
         yield query_with_paging(connection, i)
 
@@ -104,36 +125,27 @@ def update_record(connection_pool, move_results):
             connected = True
             conn = connection_pool.get_connection()
             cur = conn.cursor()
+            # Looping on {'filename': Bool}
             for k, v in move_results.items():
-                new_filename = 'avatar/' + "/".join(k.split('/')[1:])
-                sql = "UPDATE database1.buckets SET bucket_name = %s WHERE bucket_name = %s"
-                val = (new_filename, k)
-                cur.execute(sql, val)
-                # delete_object(k)
+                if v:
+                    new_filename = 'avatar/' + "/".join(k.split('/')[1:])
+                    logger.info(
+                        "Updating S3 object record  %s on database to %s.", k, new_filename)
+                    sql = "UPDATE database1.buckets SET bucket_name = %s WHERE bucket_name = %s"
+                    val = (new_filename, k)
+                    cur.execute(sql, val)
+                    # delete_object(k)
             cur.close()
             conn.commit()
             conn.close()
         except mysql.connector.errors.PoolError:
-            print("Sleeping.. (Pool Error)")
-            sleep(.5)
+            logger.error(
+                "Could not acquire database connection from ConnectionPool. Tring again...")
+            sleep(0.2)
         except mysql.connector.errors.DatabaseError:
-            print("Sleeping.. (Database Error)")
-            sleep(.5)
-
-
-def move_file(old_filename, cur):
-    new_filename = 'avatar/' + "/".join(old_filename.split('/')[1:])
-    print(old_filename)
-    print(new_filename)
-    s3.copy_object(
-        ACL='public-read',
-        Bucket=bucket_to,
-        CopySource={'Bucket': bucket_from, 'Key': old_filename},
-        Key=new_filename
-    )
-
-    update_record(new_filename, old_filename)
-    delete_object(old_filename)
+            logger.error(
+                "Could not connect to server: Connection refused.  Trying again...")
+            sleep(0.2)
 
 
 def move_file_without_update(old_filename):
@@ -145,13 +157,47 @@ def move_file_without_update(old_filename):
        Returns (dict): Return dictionary of the moved S3 object.
     """
     new_filename = 'avatar/' + "/".join(old_filename.split('/')[1:])
-    s3.copy_object(
-        ACL='public-read',
-        Bucket=bucket_to,
-        CopySource={'Bucket': bucket_from, 'Key': old_filename},
-        Key=new_filename
-    )
-    return {old_filename: True}
+    try:
+        copy_result = s3.copy_object(
+            ACL='public-read',
+            Bucket=bucket_to,
+            CopySource={'Bucket': bucket_from, 'Key': old_filename},
+            Key=new_filename
+        )
+
+        """
+         If the error occurs during the copy operation, the error response is embedded in the 200 OK response. 
+         This means that a 200 OK response can contain either a success or an error.
+        """
+        if copy_result['ResponseMetadata']['HTTPStatusCode'] == 200:
+            logger.info('Copying object {}'.format(old_filename))
+            if len(copy_result['CopyObjectResult']) == 0:
+                logger.error("{}{}{}".format(
+                    'InternalError:', 'Object: ' + old_filename,
+                    ' not copied,  S3 aborted request'))
+                return {old_filename: False}
+            if re.search('err|Err', json.dumps(copy_result, indent=4, sort_keys=True, default=str)):
+                logger.error("{}{}{}".format(
+                    'InternalError:', 'Object: ' + old_filename,
+                    ' not copied,  S3 aborted request'))
+                return {old_filename: False}
+        elif copy_result['ResponseMetadata']['HTTPStatusCode'] != 200:
+            logger.error("{}{}{}".format(
+                'InternalError:', 'Object: ' + old_filename,
+                ' not copied,  S3 aborted request'))
+            return {old_filename: False}
+
+        logger.info('Object %s is successfully copied', old_filename)
+        return {old_filename: True}
+    except ClientError as error:
+        if error.response['Error']['Code'] == 'NoSuchKey':
+            logger.warning("No object with name %s found on bucket %s",
+                           old_filename, bucket_from)
+            logger.warning("Object %s is not copied", old_filename)
+            return {old_filename: False}
+        if error.response['Error']['Code'] == 'NoSuchBucket':
+            logger.error("Please specify a valid bucket names")
+            raise error
 
 
 def move_all_files(files):
@@ -193,7 +239,7 @@ def main():
 
     futures_list = []
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         for row in iter_row(connection):
             futures = executor.submit(move_all_files, row)
             futures_list.append(futures)
@@ -201,7 +247,6 @@ def main():
         for future in futures_list:
             try:
                 result = future.result(timeout=60)
-                # print(result)
                 update_record(connection_pool, result)
                 # delete_all_objects(result)
                 results.append(result)
@@ -209,9 +254,7 @@ def main():
                 print(e)
                 results.append(None)
 
-    print(results)
-
 
 if __name__ == "__main__":
     main()
-    print(datetime.datetime.now() - begin_time)
+    logger.info('Finished on %s', datetime.datetime.now() - begin_time)
