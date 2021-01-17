@@ -1,20 +1,23 @@
 import concurrent.futures
+import csv
 import datetime
 import json
 import logging
 import os
+import queue
 import re
+import threading
 from time import sleep
 
 import boto3
 import botocore
-import mysql
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+import mysql
 from mysql.connector import pooling
 
-begin_time = datetime.datetime.now()
 
+begin_time = datetime.datetime.now()
 load_dotenv()
 
 aws_access_key_id = os.getenv('aws_access_key_id')
@@ -200,7 +203,7 @@ def move_file_without_update(old_filename):
             raise error
 
 
-def move_all_files(files):
+def move_all_objs(files):
     """ Move all S3 objects between Buckets.
 
        Args:
@@ -218,10 +221,51 @@ def move_all_files(files):
     # delete_object(old_filename)
 
 
-def move_all_obj(move_file, sites):
-    # We can use a with statement to ensure threads are cleaned up promptly
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        executor.map(move_file, sites)
+class ProcessThread(threading.Thread):
+    """
+    Worker class that does extra proccess on the copying results
+    """
+
+    def __init__(self, in_queue, out_queue):
+        threading.Thread.__init__(self)
+        self.in_queue = in_queue
+        self.out_queue = out_queue
+
+    def run(self):
+        while True:
+            path = self.in_queue.get()
+            result = self.process(path)
+            self.out_queue.put(result)
+            self.in_queue.task_done()
+
+    @staticmethod
+    def process(path):
+        # Do the processing job here
+        # delete_object(path)
+        return path
+
+
+class PrintThread(threading.Thread):
+    """
+    Class for writing results to a csv file
+    """
+
+    def __init__(self, queue):
+        threading.Thread.__init__(self)
+        self.queue = queue
+
+    def printfiles(self, p):
+        # print(p, file=open("output.txt", "a"))
+        with open('dit.csv', 'a') as f:
+            writer = csv.DictWriter(f, fieldnames=['Object', 'Status'])
+            writer.writeheader()
+            writer.writerow(p)
+
+    def run(self):
+        while True:
+            result = self.queue.get()
+            self.printfiles(result)
+            self.queue.task_done()
 
 
 def main():
@@ -238,21 +282,43 @@ def main():
     connection = connection_pool.get_connection()
 
     futures_list = []
-    results = []
+    objectsqueue = queue.Queue()
+    resultqueue = queue.Queue()
+
+    # spawn threads to process
+    workers_number = 20
+    logger.info('spawning %s to workers to delele and update objects',
+                workers_number)
+    for _ in range(0, workers_number):
+        worker = ProcessThread(objectsqueue, resultqueue)
+        worker.setDaemon(True)
+        worker.start()
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         for row in iter_row(connection):
-            futures = executor.submit(move_all_files, row)
+            futures = executor.submit(move_all_objs, row)
             futures_list.append(futures)
 
         for future in futures_list:
             try:
                 result = future.result(timeout=60)
-                update_record(connection_pool, result)
+                # update_record(connection_pool, result)
                 # delete_all_objects(result)
-                results.append(result)
+                # results.append(result)
+                for k, v in result.items():
+                    objectsqueue.put({'Object': k, 'Status': v})
             except Exception as e:
                 print(e)
-                results.append(None)
+                # results.append(None)
+
+    # spawn threads to print
+    worker = PrintThread(resultqueue)
+    worker.setDaemon(True)
+    worker.start()
+
+    # wait for queue to get empty
+    objectsqueue.join()
+    resultqueue.join()
 
 
 if __name__ == "__main__":
