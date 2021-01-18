@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import random
 import re
 import threading
 from time import sleep
@@ -25,18 +26,79 @@ aws_secret_access_key = os.getenv('aws_secret_access_key')
 bucket_from = os.getenv('bucket_from')
 bucket_to = os.getenv('bucket_to')
 
+
+# s3 = boto3.client(
+#     's3',
+#     aws_access_key_id=aws_access_key_id,
+#     aws_secret_access_key=aws_secret_access_key,
+#     config=client_config
+# )
+
+
+class BotoBackoff(object):
+    """
+    Wrap a client for an AWS service such that every call is backed by exponential backoff with jitter.
+    Args:
+        service (str): Name of AWS Service to wrap.
+        min_sleep_time (float): The minimum amount of time to sleep in case of failure.
+        max_retries (int): The maximum amount of retries to perform.
+    """
+
+    """
+    Note: By default boto automatically retries certain number of times, default value of 5 for maximum
+    retry attempts .so each "retry" here is likely 5 tries each time.
+    """
+
+    def __init__(self, service, aws_access_key_id, aws_secret_access_key,
+                 client_config, min_sleep_time=1e-2, max_retries=20):
+        self._service = boto3.client(service, aws_access_key_id=aws_access_key_id,
+                                     aws_secret_access_key=aws_secret_access_key, config=client_config)
+        self.min_sleep_time = min_sleep_time
+        self.max_retries = max_retries
+        self.logger = logging.getLogger()
+
+    def __getattr__(self, item):
+        fn = getattr(self._service, item)
+        if not callable(fn):
+            return fn
+
+        def call_with_backoff(**api_kwargs):
+
+            num_retries = 0
+            while True:
+                try:
+                    self.logger.debug('BotoBackoff Calling {}'.format(fn))
+                    return fn(**api_kwargs)
+                except ClientError as err:
+                    if "Rate exceeded" in err.args[0]:
+                        # if we hit the retry limit, we'll go to sleep for a bit then try again.
+                        # the number of retries determines our sleep time. This thread will sleep for
+                        # min_sleep_time * random.randint(1, 2 ** num_retries), up to at most
+                        # min_sleep_time * max_retries.
+                        # After max_retries, we can't give up, so we scale back the number of retries by a random int
+                        # to avoid collision with other threads.
+                        num_retries += 1
+                        if num_retries > self.max_retries:
+                            num_retries = random.randint(1, self.max_retries)
+                        sleep_time = self.min_sleep_time * \
+                            random.randint(1, 2 ** num_retries)
+                        self.logger.debug(
+                            "{} Hit retry limit, sleeping for {} seconds".format(item, sleep_time))
+                        self.logger.debug("arguments: {}".format(
+                            json.dumps(api_kwargs, indent=4, separators=(',', ': '))))
+                        self.logger.error(err)
+                        sleep(sleep_time)
+                    else:
+                        # let the caller handle every other error.
+                        raise
+
+        return call_with_backoff
+
+
 client_config = botocore.config.Config(
     max_pool_connections=50,
 )
-
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=aws_access_key_id,
-    aws_secret_access_key=aws_secret_access_key,
-    config=client_config
-)
-
-
+s3 = BotoBackoff('s3', aws_access_key_id, aws_secret_access_key, client_config)
 # Set up our logger
 format = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=format)
@@ -133,7 +195,7 @@ def update_record(connection_pool, move_results):
                 if v:
                     new_filename = 'avatar/' + "/".join(k.split('/')[1:])
                     logger.info(
-                        "Updating S3 object record  %s on database to %s.", k, new_filename)
+                        "Updating S3 object record  {} on database to {}.".format(k, new_filename))
                     sql = "UPDATE database1.buckets SET bucket_name = %s WHERE bucket_name = %s"
                     val = (new_filename, k)
                     cur.execute(sql, val)
@@ -190,13 +252,13 @@ def move_file_without_update(old_filename):
                 ' not copied,  S3 aborted request'))
             return {old_filename: False}
 
-        logger.info('Object %s is successfully copied', old_filename)
+        logger.info('Object {} is successfully copied'.format(old_filename))
         return {old_filename: True}
     except ClientError as error:
         if error.response['Error']['Code'] == 'NoSuchKey':
-            logger.warning("No object with name %s found on bucket %s",
-                           old_filename, bucket_from)
-            logger.warning("Object %s is not copied", old_filename)
+            logger.warning("No object with name {} found on bucket {}".format(
+                old_filename, bucket_from))
+            logger.warning("Object {} is not copied".format(old_filename))
             return {old_filename: False}
         if error.response['Error']['Code'] == 'NoSuchBucket':
             logger.error("Please specify a valid bucket names")
@@ -287,8 +349,8 @@ def main():
 
     # spawn threads to process
     workers_number = 20
-    logger.info('spawning %s to workers to delele and update objects',
-                workers_number)
+    logger.info(
+        'spawning {} to workers to delele and update objects'.format(workers_number))
     for _ in range(0, workers_number):
         worker = ProcessThread(objectsqueue, resultqueue)
         worker.setDaemon(True)
@@ -323,4 +385,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    logger.info('Finished on %s', datetime.datetime.now() - begin_time)
+    logger.info('Finished on {}'.format(datetime.datetime.now() - begin_time))
