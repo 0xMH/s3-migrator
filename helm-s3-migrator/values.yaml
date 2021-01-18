@@ -1,0 +1,67 @@
+# Default values for job.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+global:
+  environment:
+    - name: bucket_to
+      value: ""
+    - name: bucket_from
+      value: ""
+    - name: aws_access_key_id
+      value: ""
+    - name: aws_secret_access_key
+      value: ""
+    - name: DBUser
+      value: ""
+    - name: DBPassword
+      value: ""
+    - name: DBHost
+      value: ""
+
+## Job image
+image:
+  repository: "s3-migrator"
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+#command: ["/bin/sh","-c"]
+#args: ["echo 'consuming a message'; sleep 5"]
+
+## Define env
+# env:
+
+## Job configurations
+backoffLimit: 4
+restartPolicy: Never
+
+# By default, fullname uses '{{ .Release.Name }}-{{ .Chart.Name }}'. This
+# overrides that and uses the given string instead.
+# fullnameOverride: "some-name"
+
+# This adds a prefix
+# fullnamePrefix: "pre-"
+# This appends a suffix
+# fullnameSuffix: "-suf"
+
+annotations: {}
+
+#environment:
+#  - name: VAR1
+#    value: value1
+#  - name: VAR2
+#    value: value2
+
+## define resources
+#resources:
+#  limits:
+#    cpu: 2
+#    memory: 2000Mi
+#  requests:
+#    cpu: 500m
+#    memory: 500Mi
+
+securityContext:
+  runAsUser:
+  runAsGroup:
+  fsGroup:

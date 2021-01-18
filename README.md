@@ -60,3 +60,4 @@ Run the following in your command prompt to install:
 - [ ] Use Bulk load approach to load the changes to datbase, Maybe use either
       Load Data Infile or bulk insert Statement.
 - [ ] Make it configurable and Add CLI arguments 
+- [ ] Improve Helm by adding Kubernetes secrets and read env vars from it

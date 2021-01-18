@@ -1,0 +1,13 @@
+---
+apiVersion: v2
+name: job
+version: 0.1.1
+appVersion: 0.1.1
+description: A Helm chart which provide a DRY job deployment mechanism
+maintainers:
+  - name: alexnuttinck
+  - name: terence-bigtt
+dependencies:
+- name: common
+  version: "^0.0.5"
+  repository: "https://charts.helm.sh/incubator"
