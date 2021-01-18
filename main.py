@@ -27,14 +27,6 @@ bucket_from = os.getenv('bucket_from')
 bucket_to = os.getenv('bucket_to')
 
 
-# s3 = boto3.client(
-#     's3',
-#     aws_access_key_id=aws_access_key_id,
-#     aws_secret_access_key=aws_secret_access_key,
-#     config=client_config
-# )
-
-
 class BotoBackoff(object):
     """
     Wrap a client for an AWS service such that every call is backed by exponential backoff with jitter.
@@ -111,7 +103,8 @@ def delete_object(object_name):
        Args:
            object_name (string): S3 object name.
     """
-    s3.delete_object(Bucket=bucket_from, Key=object_name)
+    deletion_results = s3.delete_object(Bucket=bucket_from, Key=object_name)
+    logger.debug(deletion_results)
 
 
 def delete_all_objects(move_results):
@@ -193,13 +186,29 @@ def update_record(connection_pool, move_results):
             # Looping on {'filename': Bool}
             for k, v in move_results.items():
                 if v:
-                    new_filename = 'avatar/' + "/".join(k.split('/')[1:])
-                    logger.info(
-                        "Updating S3 object record  {} on database to {}.".format(k, new_filename))
-                    sql = "UPDATE database1.buckets SET bucket_name = %s WHERE bucket_name = %s"
-                    val = (new_filename, k)
-                    cur.execute(sql, val)
-                    # delete_object(k)
+                    attempts = 10
+                    counter = 0
+                    back_off = 5
+                    new_filename = new_object_name(k)
+                    while attempts > counter:
+                        if bucket_check_s3object_exists(s3, k):
+                            logger.info(
+                                "Updating S3 object record  {} on database to {}".format(k, new_filename))
+                            sql = "UPDATE database1.buckets SET bucket_name = %s WHERE bucket_name = %s"
+                            val = (new_filename, k)
+                            cur.execute(sql, val)
+                            break
+                        else:
+                            logger.warning(
+                                "Failed to update object {} on the database. Some error happened on copying proccess".format(k))
+                            # Create basic exponential back off to wait while
+                            # the object is being copied
+                            delay = (counter * back_off) + 1
+                            counter += 1
+                            logger.warning(
+                                'trying again in {} seconds'.format(delay))
+                            sleep(delay)
+                            continue
             cur.close()
             conn.commit()
             conn.close()
@@ -221,7 +230,8 @@ def move_file_without_update(old_filename):
            moved.
        Returns (dict): Return dictionary of the moved S3 object.
     """
-    new_filename = 'avatar/' + "/".join(old_filename.split('/')[1:])
+    # new_filename = 'avatar/' + "/".join(old_filename.split('/')[1:])
+    new_filename = new_object_name(old_filename)
     try:
         copy_result = s3.copy_object(
             ACL='public-read',
@@ -283,28 +293,101 @@ def move_all_objs(files):
     # delete_object(old_filename)
 
 
+def new_object_name(old_filename):
+    return 'avatar/' + "/".join(old_filename.split('/')[1:])
+
+
+def bucket_check_s3object_exists(s3_client, key):
+    try:
+        logger.info(
+            'Checking if object {} is copied to {}'.format(key, bucket_to))
+        s3_client.head_object(Bucket=bucket_to, Key=new_object_name(key))
+        return True
+    except ClientError as e:
+        logger.info('Head request respone {}'.format(
+            e.response['Error']['Code']))
+        return int(e.response['Error']['Code']) != 404
+
+
+def database_check_s3object_exists_(connection_pool, object_name):
+    """
+    Checking if an object exists on MariaDB By asking it to return a 1 or 0 if
+    the result produces any matches.
+    This is much more efficient than returning actual records and counting the
+    amount client side because it saves serialization and deserialization on
+    both sides, and the data transfer.
+
+   Args:
+       connection_pool (connection_pool): The reserved MariaDBl
+       object_name (string): S3 object name
+
+   Returns (Bool)
+
+    """
+    sql = "SELECT COUNT(1) FROM database1.buckets WHERE bucket_name = %s"
+
+    conn = connection_pool.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql, (new_object_name(object_name),))
+    x = cursor.fetchone()[0]
+    logger.info(
+        'Checking if object {} is updated on MariaDB'.format(object_name))
+    if x:
+        cursor.close()
+        conn.close()
+        return True
+    else:
+        cursor.close()
+        conn.close()
+        return False
+
+
 class ProcessThread(threading.Thread):
     """
     Worker class that does extra proccess on the copying results
     """
 
-    def __init__(self, in_queue, out_queue):
+    logger.debug('Starting workers threads for deletion proccess')
+
+    def __init__(self, in_queue, out_queue, s3_connection, db_connection):
         threading.Thread.__init__(self)
         self.in_queue = in_queue
         self.out_queue = out_queue
+        self.s3_connection = s3_connection
+        self.db_connection = db_connection
 
     def run(self):
         while True:
             path = self.in_queue.get()
-            result = self.process(path)
+            result = self.process(path, self.s3_connection, self.db_connection)
             self.out_queue.put(result)
             self.in_queue.task_done()
 
-    @staticmethod
-    def process(path):
-        # Do the processing job here
-        # delete_object(path)
-        return path
+    # @staticmethod
+    def process(self, path, s3_connection, db_connection):
+        attempts = 10
+        counter = 0
+        back_off = 5
+        while attempts > counter:
+            # Before we delete an object we nee to make sure that the object
+            # Is indeed exists on **BOTH** the NewS3Bucket and Updated in MariaDB
+            if (database_check_s3object_exists_(db_connection, path) and
+                    bucket_check_s3object_exists(s3_connection, path)):
+                logger.info('deleting object {} from {}'.format(
+                    path, bucket_from))
+                delete_object(path)
+                logger.info('Object {} is deleted'.format(path))
+                # return path
+            else:
+                logger.warning("Could not delete old object {} from {}. Please Check if {} is indeed copied to {} bucket and its record is updated on database".format(
+                    path, bucket_from, new_object_name(path), bucket_to))
+                # the object is being copied
+                delay = (counter * back_off) + 1
+                counter += 1
+                logger.warning('trying again in {} seconds'.format(delay))
+                sleep(delay)
+                continue
+            return path
 
 
 class PrintThread(threading.Thread):
@@ -318,10 +401,11 @@ class PrintThread(threading.Thread):
 
     def printfiles(self, p):
         # print(p, file=open("output.txt", "a"))
-        with open('dit.csv', 'a') as f:
-            writer = csv.DictWriter(f, fieldnames=['Object', 'Status'])
-            writer.writeheader()
-            writer.writerow(p)
+        # with open('dit.csv', 'a') as f:
+        #     writer = csv.DictWriter(f, fieldnames=['Object', 'Status'])
+        #     writer.writeheader()
+        #     writer.writerow(p)
+        print(p)
 
     def run(self):
         while True:
@@ -341,18 +425,20 @@ def main():
                                                       'DBPassword'),
                                                   host=os.getenv('host'),
                                                   port=3306)
+
     connection = connection_pool.get_connection()
+    connection2 = connection_pool.get_connection()
 
     futures_list = []
     objectsqueue = queue.Queue()
     resultqueue = queue.Queue()
 
     # spawn threads to process
-    workers_number = 20
+    workers_number = 5
     logger.info(
         'spawning {} to workers to delele and update objects'.format(workers_number))
-    for _ in range(0, workers_number):
-        worker = ProcessThread(objectsqueue, resultqueue)
+    for _ in range(0, 5):
+        worker = ProcessThread(objectsqueue, resultqueue, s3, connection_pool)
         worker.setDaemon(True)
         worker.start()
 
@@ -364,11 +450,11 @@ def main():
         for future in futures_list:
             try:
                 result = future.result(timeout=60)
-                # update_record(connection_pool, result)
+                update_record(connection_pool, result)
                 # delete_all_objects(result)
                 # results.append(result)
-                for k, v in result.items():
-                    objectsqueue.put({'Object': k, 'Status': v})
+                for k in result:
+                    objectsqueue.put(k)
             except Exception as e:
                 print(e)
                 # results.append(None)
@@ -381,6 +467,7 @@ def main():
     # wait for queue to get empty
     objectsqueue.join()
     resultqueue.join()
+    connection.close()
 
 
 if __name__ == "__main__":
