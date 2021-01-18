@@ -1,6 +1,5 @@
 boto3==1.16.53
 botocore==1.19.53
-mariadb==1.0.5
 mysql-connector-python==8.0.12
 python-dotenv==0.15.0
 botocore==1.19.53
