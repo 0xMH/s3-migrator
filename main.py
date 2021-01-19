@@ -21,19 +21,25 @@ from mysql.connector import pooling
 begin_time = datetime.datetime.now()
 load_dotenv()
 
+# Set up our logger
+format = '%(asctime)s - %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=format)
+logger = logging.getLogger()
+
+# The IAM user that will be used here should have an IAM policy
+# off at least `ListBucket`, `PutObject`, `GetObject` and `DeleteObject` and `PutObjectAcl` is also necessary.
 aws_access_key_id = os.getenv('aws_access_key_id')
 aws_secret_access_key = os.getenv('aws_secret_access_key')
 bucket_from = os.getenv('bucket_from')
 bucket_to = os.getenv('bucket_to')
 
-
 client_config = botocore.config.Config(
     max_pool_connections=50,
 )
-# Set up our logger
-format = '%(asctime)s - %(levelname)s - %(message)s'
-logging.basicConfig(level=logging.INFO, format=format)
-logger = logging.getLogger()
+
+if not bucket_to or not bucket_from:
+    logger.error('Please enter a valid Buckets Names')
+    exit()
 
 
 class BotoBackoff(object):
@@ -162,7 +168,7 @@ class PrintThread(threading.Thread):
         #     writer = csv.DictWriter(f, fieldnames=['Object', 'Status'])
         #     writer.writeheader()
         #     writer.writerow(p)
-        print(p)
+        return
 
     def run(self):
         while True:
@@ -209,7 +215,7 @@ def s3_objects_count(conn):
 
 
 def query_with_paging(conn, offset):
-    """ Pulls chunks of rows from MariaDB 
+    """ Pulls chunks of rows from MariaDB
 
        Args:
            conn (MySQLConnection): Mysql connection.
@@ -217,7 +223,7 @@ def query_with_paging(conn, offset):
        Returns (list): Chunks of MariaDB data.
     """
     cur = conn.cursor()
-    query = """SELECT bucket_name FROM buckets WHERE 
+    query = """SELECT bucket_name FROM buckets WHERE
             bucket_name REGEXP '^image' LIMIT 10 OFFSET %d""" % offset
     cur.execute(query)
     rows = cur.fetchall()
@@ -315,7 +321,7 @@ def move_file_without_update(old_filename):
         )
 
         """
-         If the error occurs during the copy operation, the error response is embedded in the 200 OK response. 
+         If the error occurs during the copy operation, the error response is embedded in the 200 OK response.
          This means that a 200 OK response can contain either a success or an error.
         """
         if copy_result['ResponseMetadata']['HTTPStatusCode'] == 200:
@@ -419,6 +425,9 @@ def database_check_s3object_exists_(connection_pool, object_name):
 def main():
 
     # TODO: Use MySQLCursorRaw cursor for performance
+    # User used on mariadb should have at least `SELECT` and `UPDATE`
+    # Privileges on the database. Please follow the Principle of least privilege
+    # and don't ever give more privileges than a user needs.
     connection_pool = pooling.MySQLConnectionPool(pool_name="pynative_pool",
                                                   pool_size=32,
                                                   pool_reset_session=True,
@@ -427,8 +436,9 @@ def main():
                                                       'DBPassword'),
                                                   host=os.getenv('DBHost'),
                                                   database=os.getenv(
-                                                      'MYSQL_DATABASE'),
-                                                  port=3306)
+                                                      'DATABASE'),
+                                                  port=os.getenv('DBPort')
+                                                  )
 
     connection = connection_pool.get_connection()
 
