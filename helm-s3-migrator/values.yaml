@@ -18,10 +18,13 @@ global:
       value: ""
     - name: DBHost
       value: ""
-
+    - name: DATABASE
+      value: ""
+    - name: DBPort
+      value: ""
 ## Job image
 image:
-  repository: "s3-migrator"
+  repository: "oxmh/s3-migrator"
   tag: "latest"
   pullPolicy: IfNotPresent
 
@@ -32,7 +35,7 @@ image:
 # env:
 
 ## Job configurations
-backoffLimit: 4
+backoffLimit: 10
 restartPolicy: Never
 
 # By default, fullname uses '{{ .Release.Name }}-{{ .Chart.Name }}'. This

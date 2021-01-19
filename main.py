@@ -224,7 +224,7 @@ def query_with_paging(conn, offset):
     """
     cur = conn.cursor()
     query = """SELECT bucket_name FROM buckets WHERE
-            bucket_name REGEXP '^image' LIMIT 10 OFFSET %d""" % offset
+            bucket_name REGEXP '^image' ORDER BY id LIMIT 10 OFFSET %d""" % offset
     cur.execute(query)
     rows = cur.fetchall()
     return ["%s" % x for x in rows]
